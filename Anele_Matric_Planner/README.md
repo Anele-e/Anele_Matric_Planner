@@ -47,4 +47,13 @@ password:
 ```
 
 A successful login returns a 30-minute bearer access token and the public
-profile. Invalid credentials return `401 Unauthorized`.
+profile together with the student's subjects. Invalid credentials return
+`401 Unauthorized`.
+
+Each account starts with Maths, isiXhosa, English, Physics, Life Orientation,
+and two optional subject slots. The optional slots can be renamed from the
+simple Flet subject view. `GET /subjects` returns the saved list for the
+authenticated user; `PATCH /subjects/{subject_id}` renames an optional subject.
+
+Run the Flet app from this directory with `python frontend/main.py`. It has a
+register view, a login view, and a plain subject list.

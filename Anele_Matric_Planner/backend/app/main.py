@@ -11,8 +11,9 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 import jwt
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -26,6 +27,16 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or secrets.token_urlsafe(32)
 ACCESS_TOKEN_TTL_SECONDS = 30 * 60
 PASSWORD_HASH_ITERATIONS = 600_000
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+DEFAULT_SUBJECTS = (
+    ("maths", "Maths", False, 1),
+    ("isixhosa", "isiXhosa", False, 2),
+    ("english", "English", False, 3),
+    ("physics", "Physics", False, 4),
+    ("life_orientation", "Life Orientation", False, 5),
+    ("optional_1", "Optional subject 1", True, 6),
+    ("optional_2", "Optional subject 2", True, 7),
+)
+bearer_auth = HTTPBearer(auto_error=False)
 
 
 app = FastAPI(
@@ -48,6 +59,7 @@ def database_connection() -> Iterator[sqlite3.Connection]:
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DATABASE_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
     try:
         yield connection
         connection.commit()
@@ -70,6 +82,20 @@ def initialize_database() -> None:
                 grade INTEGER NOT NULL,
                 password_hash TEXT NOT NULL,
                 created_at INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subjects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                subject_key TEXT NOT NULL,
+                name TEXT NOT NULL COLLATE NOCASE,
+                is_optional INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL,
+                UNIQUE (user_id, subject_key),
+                UNIQUE (user_id, name)
             )
             """
         )
@@ -133,12 +159,22 @@ class User(BaseModel):
 
 
 class Subject(BaseModel):
+    id: int
     name: str
-    user_id: int
-    target_grade: int
-    current_grade: int
-    color: Optional[str] = None
-    description: Optional[str] = None
+    is_optional: bool
+    position: int
+
+
+class SubjectUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Subject name cannot be blank.")
+        return normalized
 
 
 class Task(BaseModel):
@@ -188,6 +224,7 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     user: User
+    subjects: list[Subject]
 
 
 def _encode_base64url(value: bytes) -> str:
@@ -252,6 +289,68 @@ def public_user(row: sqlite3.Row) -> User:
     )
 
 
+def public_subject(row: sqlite3.Row) -> Subject:
+    return Subject(
+        id=row["id"],
+        name=row["name"],
+        is_optional=bool(row["is_optional"]),
+        position=row["position"],
+    )
+
+
+def ensure_default_subjects(connection: sqlite3.Connection, user_id: int) -> None:
+    connection.executemany(
+        """
+        INSERT OR IGNORE INTO subjects (user_id, subject_key, name, is_optional, position)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            (user_id, subject_key, name, int(is_optional), position)
+            for subject_key, name, is_optional, position in DEFAULT_SUBJECTS
+        ),
+    )
+
+
+def subjects_for_user(connection: sqlite3.Connection, user_id: int) -> list[Subject]:
+    rows = connection.execute(
+        "SELECT id, name, is_optional, position FROM subjects WHERE user_id = ? ORDER BY position",
+        (user_id,),
+    ).fetchall()
+    return [public_subject(row) for row in rows]
+
+
+def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_auth),
+) -> User:
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="A valid bearer token is required.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if credentials is None:
+        raise unauthorized
+
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            JWT_SECRET_KEY,
+            algorithms=["HS256"],
+        )
+        user_id = int(payload["sub"])
+    except (jwt.InvalidTokenError, KeyError, TypeError, ValueError):
+        raise unauthorized from None
+
+    with database_connection() as connection:
+        row = connection.execute(
+            "SELECT id, username, email, full_name, grade FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if row is None:
+        raise unauthorized
+    return public_user(row)
+
+
 @app.get("/")
 async def root():
     return {
@@ -313,6 +412,7 @@ def register_user(request: RegisterRequest) -> User:
                     int(time.time()),
                 ),
             )
+            ensure_default_subjects(connection, cursor.lastrowid)
         except sqlite3.IntegrityError:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -349,8 +449,60 @@ def login_user(request: LoginRequest) -> TokenResponse:
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    with database_connection() as connection:
+        ensure_default_subjects(connection, row["id"])
+        subjects = subjects_for_user(connection, row["id"])
+
     return TokenResponse(
         access_token=create_access_token(row["id"]),
         expires_in=ACCESS_TOKEN_TTL_SECONDS,
         user=public_user(row),
+        subjects=subjects,
     )
+
+
+@app.get("/subjects", response_model=list[Subject])
+def get_subjects(current_user: User = Depends(get_current_user)) -> list[Subject]:
+    with database_connection() as connection:
+        ensure_default_subjects(connection, current_user.id)
+        return subjects_for_user(connection, current_user.id)
+
+
+@app.patch("/subjects/{subject_id}", response_model=Subject)
+def rename_optional_subject(
+    subject_id: int,
+    request: SubjectUpdate,
+    current_user: User = Depends(get_current_user),
+) -> Subject:
+    with database_connection() as connection:
+        row = connection.execute(
+            "SELECT subject_key FROM subjects WHERE id = ? AND user_id = ?",
+            (subject_id, current_user.id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Subject not found.",
+            )
+        if not row["subject_key"].startswith("optional_"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only optional subjects can be renamed.",
+            )
+
+        try:
+            connection.execute(
+                "UPDATE subjects SET name = ? WHERE id = ? AND user_id = ?",
+                (request.name, subject_id, current_user.id),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That subject name is already in your list.",
+            ) from None
+
+        updated_row = connection.execute(
+            "SELECT id, name, is_optional, position FROM subjects WHERE id = ?",
+            (subject_id,),
+        ).fetchone()
+    return public_subject(updated_row)
