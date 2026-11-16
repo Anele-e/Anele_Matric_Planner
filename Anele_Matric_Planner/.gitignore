@@ -10,6 +10,11 @@ env/
 # Environments / secrets
 .env
 
+# Local application data
+*.db
+*.sqlite
+*.sqlite3
+
 # Tool caches
 .mypy_cache/
 .ruff_cache/
