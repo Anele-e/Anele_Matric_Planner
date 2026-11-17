@@ -1,6 +1,7 @@
 # Matric Planner API
 
-The backend is a FastAPI application. It stores registered users in SQLite at
+The backend is a FastAPI application. It stores users, subjects, tasks,
+assessments, study sessions, and resources in SQLite at
 `backend/app/matric_planner.db` by default; set `MATRIC_PLANNER_DB_PATH` to use a
 different database file.
 
@@ -37,23 +38,33 @@ server and are never returned. Duplicate usernames or email addresses return
 `409 Conflict`.
 
 Log in with `POST /auth/login`, providing either `email` or `username` with the
-password:
-
-```json
-{
-  "email": "anele@example.com",
-  "password": "a-long-password"
-}
-```
-
-A successful login returns a 30-minute bearer access token and the public
-profile together with the student's subjects. Invalid credentials return
-`401 Unauthorized`.
+password. A successful login returns a 30-minute bearer token, the public
+profile, and the student's subjects. Invalid credentials return `401
+Unauthorized`.
 
 Each account starts with Maths, isiXhosa, English, Physics, Life Orientation,
-and two optional subject slots. The optional slots can be renamed from the
-simple Flet subject view. `GET /subjects` returns the saved list for the
+and two optional subject slots. `GET /subjects` returns the saved list for the
 authenticated user; `PATCH /subjects/{subject_id}` renames an optional subject.
+`GET /users/me` returns the authenticated user's public profile.
 
-Run the Flet app from this directory with `python frontend/main.py`. It has a
-register view, a login view, and a plain subject list.
+## Planner endpoints
+
+The following routes require the bearer token returned by `/auth/login`:
+
+| Record | Collection | Single record |
+| --- | --- | --- |
+| Tasks | `GET`, `POST /tasks` | `GET`, `PATCH`, `DELETE /tasks/{task_id}` |
+| Assessments | `GET`, `POST /assessments` | `GET`, `PATCH`, `DELETE /assessments/{assessment_id}` |
+| Study sessions | `GET`, `POST /study-sessions` | `GET`, `PATCH`, `DELETE /study-sessions/{study_session_id}` |
+| Resources | `GET`, `POST /resources` | `GET`, `PATCH`, `DELETE /resources/{resource_id}` |
+
+Collection reads accept an optional `subject_id` query parameter. Create
+requests take the record fields and a subject ID; the API assigns the signed-in
+user ID. Each record is scoped to its owner, including reads, updates, deletes,
+and subject references.
+
+Run the Flet app from this directory with `python frontend/main.py`. It has
+registration and login views, a subject template, and simple list/create
+templates for each planner record, with complete and delete actions where they
+apply. Set `MATRIC_PLANNER_API_URL` if the API is not running at
+`http://localhost:8000`.

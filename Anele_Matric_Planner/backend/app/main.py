@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -99,6 +99,64 @@ def initialize_database() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                description TEXT,
+                due_date TEXT,
+                completed INTEGER NOT NULL DEFAULT 0,
+                priority INTEGER
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS assessments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                description TEXT,
+                due_date TEXT,
+                completed INTEGER NOT NULL DEFAULT 0,
+                assessment_type TEXT,
+                assessment_date TEXT,
+                marks_obtained REAL,
+                total_marks REAL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS study_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+                start_time TEXT NOT NULL,
+                end_time TEXT,
+                topic TEXT,
+                notes TEXT,
+                completed INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                description TEXT,
+                resource_type TEXT
+            )
+            """
+        )
 
 
 initialize_database()
@@ -175,6 +233,82 @@ class SubjectUpdate(BaseModel):
         if not normalized:
             raise ValueError("Subject name cannot be blank.")
         return normalized
+
+
+class TaskCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    subject_id: int
+    completed: bool = False
+    priority: Optional[int] = Field(default=None, ge=1, le=5)
+
+
+class TaskUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    subject_id: Optional[int] = None
+    completed: Optional[bool] = None
+    priority: Optional[int] = Field(default=None, ge=1, le=5)
+
+
+class AssessmentCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    subject_id: int
+    completed: bool = False
+    assessment_type: Optional[str] = None
+    assessment_date: Optional[str] = None
+    marks_obtained: Optional[float] = Field(default=None, ge=0)
+    total_marks: Optional[float] = Field(default=None, gt=0)
+
+
+class AssessmentUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    subject_id: Optional[int] = None
+    completed: Optional[bool] = None
+    assessment_type: Optional[str] = None
+    assessment_date: Optional[str] = None
+    marks_obtained: Optional[float] = Field(default=None, ge=0)
+    total_marks: Optional[float] = Field(default=None, gt=0)
+
+
+class StudySessionCreate(BaseModel):
+    subject_id: int
+    start_time: str = Field(min_length=1, max_length=64)
+    end_time: Optional[str] = None
+    topic: Optional[str] = None
+    notes: Optional[str] = None
+    completed: bool = False
+
+
+class StudySessionUpdate(BaseModel):
+    subject_id: Optional[int] = None
+    start_time: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    end_time: Optional[str] = None
+    topic: Optional[str] = None
+    notes: Optional[str] = None
+    completed: Optional[bool] = None
+
+
+class ResourceCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    url: str = Field(min_length=1, max_length=2048)
+    description: Optional[str] = None
+    subject_id: int
+    resource_type: Optional[str] = None
+
+
+class ResourceUpdate(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=160)
+    url: Optional[str] = Field(default=None, min_length=1, max_length=2048)
+    description: Optional[str] = None
+    subject_id: Optional[int] = None
+    resource_type: Optional[str] = None
 
 
 class Task(BaseModel):
@@ -358,7 +492,7 @@ async def root():
         "docs": "/docs",
         "endpoints": {
             "health": "/health",
-            "users": "/users",
+            "users": "/users/me",
             "login": "/auth/login",
             "register": "/auth/register",
             "subjects": "/subjects",
@@ -378,6 +512,11 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+@app.get("/users/me", response_model=User)
+def get_my_profile(current_user: User = Depends(get_current_user)) -> User:
+    return current_user
 
 
 @app.post(
@@ -506,3 +645,310 @@ def rename_optional_subject(
             (subject_id,),
         ).fetchone()
     return public_subject(updated_row)
+
+
+ENTITY_FIELDS = {
+    "tasks": (
+        "title", "description", "due_date", "subject_id", "completed", "priority"
+    ),
+    "assessments": (
+        "title", "description", "due_date", "subject_id", "completed",
+        "assessment_type", "assessment_date", "marks_obtained", "total_marks",
+    ),
+    "study_sessions": (
+        "subject_id", "start_time", "end_time", "topic", "notes", "completed"
+    ),
+    "resources": (
+        "title", "url", "description", "subject_id", "resource_type"
+    ),
+}
+ENTITY_REQUIRED_FIELDS = {
+    "tasks": {"title", "subject_id", "completed"},
+    "assessments": {"title", "subject_id", "completed"},
+    "study_sessions": {"subject_id", "start_time", "completed"},
+    "resources": {"title", "url", "subject_id"},
+}
+
+
+def _entity_not_found() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Record not found.",
+    )
+
+
+def _ensure_subject_belongs_to_user(
+    connection: sqlite3.Connection,
+    subject_id: int,
+    user_id: int,
+) -> None:
+    row = connection.execute(
+        "SELECT 1 FROM subjects WHERE id = ? AND user_id = ?",
+        (subject_id, user_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Subject not found.",
+        )
+
+
+def _entity_output(row: sqlite3.Row) -> dict:
+    result = dict(row)
+    if "completed" in result:
+        result["completed"] = bool(result["completed"])
+    return result
+
+
+def _list_entities(
+    table: str,
+    user_id: int,
+    subject_id: Optional[int] = None,
+) -> list[dict]:
+    with database_connection() as connection:
+        if subject_id is not None:
+            _ensure_subject_belongs_to_user(connection, subject_id, user_id)
+            rows = connection.execute(
+                f"SELECT * FROM {table} WHERE user_id = ? AND subject_id = ? ORDER BY id DESC",
+                (user_id, subject_id),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                f"SELECT * FROM {table} WHERE user_id = ? ORDER BY id DESC",
+                (user_id,),
+            ).fetchall()
+    return [_entity_output(row) for row in rows]
+
+
+def _create_entity(table: str, values: dict, user_id: int) -> dict:
+    fields = ENTITY_FIELDS[table]
+    with database_connection() as connection:
+        _ensure_subject_belongs_to_user(connection, values["subject_id"], user_id)
+        insert_fields = ("user_id", *fields)
+        insert_values = (user_id, *(int(values[name]) if name == "completed" else values[name] for name in fields))
+        placeholders = ", ".join("?" for _ in insert_fields)
+        cursor = connection.execute(
+            f"INSERT INTO {table} ({', '.join(insert_fields)}) VALUES ({placeholders})",
+            insert_values,
+        )
+        row = connection.execute(
+            f"SELECT * FROM {table} WHERE id = ? AND user_id = ?",
+            (cursor.lastrowid, user_id),
+        ).fetchone()
+    return _entity_output(row)
+
+
+def _get_entity(table: str, record_id: int, user_id: int) -> dict:
+    with database_connection() as connection:
+        row = connection.execute(
+            f"SELECT * FROM {table} WHERE id = ? AND user_id = ?",
+            (record_id, user_id),
+        ).fetchone()
+    if row is None:
+        raise _entity_not_found()
+    return _entity_output(row)
+
+
+def _update_entity(table: str, record_id: int, values: dict, user_id: int) -> dict:
+    values = {key: value for key, value in values.items() if key in ENTITY_FIELDS[table]}
+    if not values:
+        return _get_entity(table, record_id, user_id)
+
+    with database_connection() as connection:
+        existing = connection.execute(
+            f"SELECT id FROM {table} WHERE id = ? AND user_id = ?",
+            (record_id, user_id),
+        ).fetchone()
+        if existing is None:
+            raise _entity_not_found()
+
+        if "subject_id" in values:
+            if values["subject_id"] is None:
+                raise HTTPException(status_code=422, detail="subject_id cannot be null.")
+            _ensure_subject_belongs_to_user(connection, values["subject_id"], user_id)
+
+        for field in ENTITY_REQUIRED_FIELDS[table]:
+            if field in values and values[field] is None:
+                raise HTTPException(status_code=422, detail=f"{field} cannot be null.")
+
+        assignments = ", ".join(f"{field} = ?" for field in values)
+        parameters = tuple(
+            int(value) if field == "completed" and value is not None else value
+            for field, value in values.items()
+        )
+        connection.execute(
+            f"UPDATE {table} SET {assignments} WHERE id = ? AND user_id = ?",
+            (*parameters, record_id, user_id),
+        )
+        row = connection.execute(
+            f"SELECT * FROM {table} WHERE id = ? AND user_id = ?",
+            (record_id, user_id),
+        ).fetchone()
+    return _entity_output(row)
+
+
+def _delete_entity(table: str, record_id: int, user_id: int) -> None:
+    with database_connection() as connection:
+        cursor = connection.execute(
+            f"DELETE FROM {table} WHERE id = ? AND user_id = ?",
+            (record_id, user_id),
+        )
+        if cursor.rowcount == 0:
+            raise _entity_not_found()
+
+
+@app.get("/tasks", response_model=list[Task])
+def get_tasks(
+    subject_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+) -> list[dict]:
+    return _list_entities("tasks", current_user.id, subject_id)
+
+
+@app.post("/tasks", response_model=Task, status_code=status.HTTP_201_CREATED)
+def create_task(request: TaskCreate, current_user: User = Depends(get_current_user)) -> dict:
+    return _create_entity("tasks", request.model_dump(), current_user.id)
+
+
+@app.get("/tasks/{task_id}", response_model=Task)
+def get_task(task_id: int, current_user: User = Depends(get_current_user)) -> dict:
+    return _get_entity("tasks", task_id, current_user.id)
+
+
+@app.patch("/tasks/{task_id}", response_model=Task)
+def update_task(
+    task_id: int,
+    request: TaskUpdate,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return _update_entity("tasks", task_id, request.model_dump(exclude_unset=True), current_user.id)
+
+
+@app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(task_id: int, current_user: User = Depends(get_current_user)) -> Response:
+    _delete_entity("tasks", task_id, current_user.id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/assessments", response_model=list[Assessment])
+def get_assessments(
+    subject_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+) -> list[dict]:
+    return _list_entities("assessments", current_user.id, subject_id)
+
+
+@app.post("/assessments", response_model=Assessment, status_code=status.HTTP_201_CREATED)
+def create_assessment(
+    request: AssessmentCreate,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return _create_entity("assessments", request.model_dump(), current_user.id)
+
+
+@app.get("/assessments/{assessment_id}", response_model=Assessment)
+def get_assessment(
+    assessment_id: int,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return _get_entity("assessments", assessment_id, current_user.id)
+
+
+@app.patch("/assessments/{assessment_id}", response_model=Assessment)
+def update_assessment(
+    assessment_id: int,
+    request: AssessmentUpdate,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return _update_entity(
+        "assessments", assessment_id, request.model_dump(exclude_unset=True), current_user.id
+    )
+
+
+@app.delete("/assessments/{assessment_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_assessment(
+    assessment_id: int,
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    _delete_entity("assessments", assessment_id, current_user.id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/study-sessions", response_model=list[StudySession])
+def get_study_sessions(
+    subject_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+) -> list[dict]:
+    return _list_entities("study_sessions", current_user.id, subject_id)
+
+
+@app.post("/study-sessions", response_model=StudySession, status_code=status.HTTP_201_CREATED)
+def create_study_session(
+    request: StudySessionCreate,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return _create_entity("study_sessions", request.model_dump(), current_user.id)
+
+
+@app.get("/study-sessions/{study_session_id}", response_model=StudySession)
+def get_study_session(
+    study_session_id: int,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return _get_entity("study_sessions", study_session_id, current_user.id)
+
+
+@app.patch("/study-sessions/{study_session_id}", response_model=StudySession)
+def update_study_session(
+    study_session_id: int,
+    request: StudySessionUpdate,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return _update_entity(
+        "study_sessions", study_session_id, request.model_dump(exclude_unset=True), current_user.id
+    )
+
+
+@app.delete("/study-sessions/{study_session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_study_session(
+    study_session_id: int,
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    _delete_entity("study_sessions", study_session_id, current_user.id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/resources", response_model=list[Resource])
+def get_resources(
+    subject_id: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+) -> list[dict]:
+    return _list_entities("resources", current_user.id, subject_id)
+
+
+@app.post("/resources", response_model=Resource, status_code=status.HTTP_201_CREATED)
+def create_resource(
+    request: ResourceCreate,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return _create_entity("resources", request.model_dump(), current_user.id)
+
+
+@app.get("/resources/{resource_id}", response_model=Resource)
+def get_resource(resource_id: int, current_user: User = Depends(get_current_user)) -> dict:
+    return _get_entity("resources", resource_id, current_user.id)
+
+
+@app.patch("/resources/{resource_id}", response_model=Resource)
+def update_resource(
+    resource_id: int,
+    request: ResourceUpdate,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return _update_entity("resources", resource_id, request.model_dump(exclude_unset=True), current_user.id)
+
+
+@app.delete("/resources/{resource_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_resource(resource_id: int, current_user: User = Depends(get_current_user)) -> Response:
+    _delete_entity("resources", resource_id, current_user.id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
